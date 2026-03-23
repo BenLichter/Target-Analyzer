@@ -6,7 +6,7 @@ const STORAGE = {
   pipeline: "cp_pipeline_v5",
   alerts:   "cp_alerts_v5",
   tavily:   "cp_tavily_key",
-  proxycurl:"cp_proxycurl_key",
+  ninjapear:"cp_ninjapear_key",
   verified: "cp_verified_li_v2",
   vcache:   "cp_verify_cache_v2",
 };
@@ -200,180 +200,115 @@ async function tavilySearchRaw(query, key, n, maxAgeDays) {
 
 // Global API status tracker — populated during runAnalysis, read by UI
 const apiStatus = {
-  proxycurl: { ok:null, peopleFound:0, error:null },
+  ninjapear: { ok:null, peopleFound:0, error:null },
   tavily: { ok: null, error: null, credits: null, searches: 0, results: 0 },
 };
 
-// ── Proxycurl — LinkedIn-licensed contact & company search ───────────────────
+// ── NinjaPear — B2B Company & Employee Intelligence ─────────────────────────
+// Uses the same API key as your Proxycurl account (same company)
 
-// Employee search: find all employees at a company by domain
-async function proxycurlEmployeeSearch(company, key, size) {
-  if (!key) return [];
+// Verify and enrich a single person by name + employer domain
+async function njVerifyPerson(firstName, lastName, employerDomain, key, role) {
+  if (!key) return null;
   try {
-    const domain = company.toLowerCase().replace(/[^a-z0-9]/g, "") + ".com";
-    // Use the Employee Search endpoint — returns LinkedIn profiles of employees
-    const params = new URLSearchParams({
-      linkedin_company_profile_url: "",   // will use domain instead
-      employment_status: "current",
-      resolve_numeric_id: "false",
-    });
-    // Proxycurl Employee Listing endpoint
+    const params = { first_name: firstName, employer_website: "https://" + employerDomain };
+    if (lastName) params.last_name = lastName;
+    if (role) params.role = role;
     const res = await fetch("/api/proxycurl", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ endpoint: "linkedin/company/employees/", key, params: { company_domain: domain, employment_status: "current", page_size: String(size||25) } })
+      body: JSON.stringify({ endpoint: "v1/employee/profile", key, params })
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      console.warn("[Proxycurl] Employee search failed:", res.status, err);
-      apiStatus.proxycurl = { ok: false, error: res.status === 402 ? "OUT_OF_CREDITS" : res.status === 401 ? "INVALID_KEY" : "ERROR_" + res.status, peopleFound: 0 };
-      return [];
-    }
+    if (!res.ok) return null;
     const data = await res.json();
-    const employees = data.employees || [];
-    console.log("[Proxycurl] Found", employees.length, "employees for", domain);
-    apiStatus.proxycurl = { ok: true, peopleFound: employees.length };
-
-    // Each employee has: profile_url, last_updated
-    // We need to enrich each to get name/title — but that costs credits
-    // Instead use the profile URL + extract name from URL slug as a start
-    return employees.map(e => ({
-      first_name: "",
-      last_name: "",
-      title: "",
-      email: "",
-      linkedin_url: e.profile_url || "",
-      slug: (e.profile_url || "").split("/in/").pop()?.replace(/\/$/, "") || "",
-      source: "proxycurl_employee",
-    }));
-  } catch(e) {
-    console.warn("[Proxycurl] Exception:", e.message);
-    apiStatus.proxycurl = { ok: false, error: e.message, peopleFound: 0 };
-    return [];
-  }
+    if (!data.full_name) return null;
+    console.log("[NinjaPear] Verified:", data.full_name);
+    return data;
+  } catch(e) { console.warn("[NinjaPear]", e.message); return null; }
 }
 
-// Search for people at a company by role/title using Proxycurl Person Search
-async function proxycurlPersonSearch(company, key, size) {
-  if (!key) return [];
+// Look up who holds a specific role at a company
+async function njLookupByRole(role, employerDomain, key) {
+  if (!key) return null;
   try {
-    const domain = company.toLowerCase().replace(/[^a-z0-9]/g, "") + ".com";
-
-    // Use the Employee List endpoint — more reliable than person search
     const res = await fetch("/api/proxycurl", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        endpoint: "linkedin/company/employees/",
+        endpoint: "v1/employee/profile",
         key,
-        params: {
-          company_domain: domain,
-          employment_status: "current",
-          page_size: String(size || 25),
-          enrich_profiles: "enrich",
-          use_cache: "if-present",
-        }
+        params: { employer_website: "https://" + employerDomain, role }
       })
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      console.warn("[Proxycurl] Employee list failed:", res.status, err);
-      apiStatus.proxycurl = { ok: false, error: res.status === 402 ? "OUT_OF_CREDITS" : res.status === 401 ? "INVALID_KEY" : "ERROR_" + res.status, peopleFound: 0 };
-      return [];
-    }
-    const data = await res.json();
-    const employees = data.employees || [];
-    console.log("[Proxycurl] Found", employees.length, "employees for", domain);
-    apiStatus.proxycurl = { ok: true, peopleFound: employees.length };
-
-    // Each employee record has profile data when enrich_profiles=enrich
-    return employees.map(e => {
-      const p = e.profile || {};
-      const exp = (p.experiences || []).find(ex => ex.company && ex.company.toLowerCase().includes(company.toLowerCase()) && !ex.ends_at);
-      return {
-        first_name: (p.first_name || "").trim(),
-        last_name:  (p.last_name  || "").trim(),
-        title:       exp?.title || p.occupation || "",
-        email:       p.personal_emails?.[0] || "",
-        linkedin_url: e.profile_url || "",
-        city:        p.city || "",
-        country:     p.country_full_name || "",
-        departments: [exp?.title || ""],
-        seniority:   "",
-        sanitized_phone: "",
-        organization: { name: company },
-        source: "proxycurl_employees",
-      };
-    }).filter(p => p.first_name || p.last_name || p.linkedin_url);
-  } catch(e) {
-    console.warn("[Proxycurl] Exception:", e.message);
-    apiStatus.proxycurl = { ok: false, error: e.message, peopleFound: 0 };
-    return [];
-  }
-}
-
-// Enrich a company via Proxycurl
-async function proxycurlEnrichCompany(company, key) {
-  if (!key) return null;
-  try {
-    const domain = company.toLowerCase().replace(/[^a-z0-9]/g, "") + ".com";
-    // First find company LinkedIn URL, then enrich
-    const findRes = await fetch("/api/proxycurl", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ endpoint: "linkedin/company/resolve", key, params: { company_domain: domain } })
-    });
-    if (!findRes.ok) return null;
-    const findData = await findRes.json();
-    const linkedinUrl = findData.url;
-    if (!linkedinUrl) return null;
-
-    const enrichRes = await fetch("/api/proxycurl", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ endpoint: "linkedin/company", key, params: { url: linkedinUrl, categories: "exclude", funding_data: "include", exit_data: "exclude", acquisitions: "exclude", extra: "include" } })
-    });
-    if (!enrichRes.ok) return null;
-    const d = await enrichRes.json();
-    return {
-      employees:   d.company_size_on_linkedin ? d.company_size_on_linkedin[0] + "-" + d.company_size_on_linkedin[1] : (d.staff_count ? String(d.staff_count) : ""),
-      revenue:     "",
-      industry:    d.industry || "",
-      hq:          [d.hq?.city, d.hq?.state, d.hq?.country].filter(Boolean).join(", "),
-      founded:     d.founded_year ? String(d.founded_year) : "",
-      funding:     d.total_funding_in_usd ? "$" + (d.total_funding_in_usd/1e6).toFixed(0) + "M" : "",
-      tech_stack:  [],
-      linkedin:    linkedinUrl,
-      description: d.description || "",
-    };
-  } catch(e) {
-    console.warn("[Proxycurl] Company enrich failed:", e.message);
-    return null;
-  }
-}
-
-async function proxycurlLookup(name, company, key) {
-  if (!key) return null;
-  try {
-    const params = new URLSearchParams({ first_name:name.split(" ")[0]||"", last_name:name.split(" ").slice(1).join(" ")||"", company_domain:company.toLowerCase().replace(/\s+/g,"")+".com", similarity_checks:"include", enrich_profile:"skip" });
-    const res = await fetch("/api/proxycurl", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ endpoint: "linkedin/profile/resolve", key, params: Object.fromEntries(params) })
     });
     if (!res.ok) return null;
     const data = await res.json();
-    return data.url||null;
-  } catch { return null; }
+    if (!data.full_name) return null;
+    console.log("[NinjaPear] Role:", role, "->", data.full_name);
+    return data;
+  } catch(e) { return null; }
+}
+
+// Enrich company details
+async function njEnrichCompany(domain, key) {
+  if (!key) return null;
+  try {
+    const res = await fetch("/api/proxycurl", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        endpoint: "v1/company/details",
+        key,
+        params: { website: "https://" + domain, include_employee_count: "true" }
+      })
+    });
+    if (!res.ok) return null;
+    const d = await res.json();
+    const hqAddr = (d.addresses||[]).find(a=>a.is_primary) || (d.addresses||[])[0] || {};
+    return {
+      employees:    d.employee_count ? String(d.employee_count) : "",
+      revenue:      d.public_listing?.revenue_usd ? "$"+(d.public_listing.revenue_usd/1e9).toFixed(1)+"B" : "",
+      industry:     (d.specialties||[]).slice(0,3).join(", "),
+      hq:           [hqAddr.city, hqAddr.state].filter(Boolean).join(", "),
+      founded:      d.founded_year ? String(d.founded_year) : "",
+      funding:      "",
+      tech_stack:   [],
+      linkedin:     "",
+      description:  d.description || "",
+      executives:   (d.executives||[]).map(e=>({ name:e.name, title:e.title, role:e.role })),
+      tagline:      d.tagline || "",
+      company_type: d.company_type || "",
+    };
+  } catch(e) { return null; }
+}
+
+// Normalize a NinjaPear profile to internal contact shape
+function njProfileToContact(profile, company, source) {
+  if (!profile || !profile.full_name) return null;
+  const currentJob = (profile.work_experience||[]).find(e => !e.end_date);
+  return {
+    first_name:   profile.first_name || "",
+    last_name:    profile.last_name  || "",
+    title:        currentJob?.role || "",
+    email:        "",
+    linkedin_url: "",
+    twitter:      profile.x_profile_url || "",
+    city:         profile.city || "",
+    country:      profile.country || "",
+    departments:  [currentJob?.role || ""],
+    seniority:    "",
+    source:       source || "ninjapear",
+    nj_id:        profile.id || "",
+    organization: { name: company },
+  };
 }
 
 // ─── Main Analysis ────────────────────────────────────────────────────────────
 async function runAnalysis(company, onStep, keys) {
-  const { tavily:tKey, proxycurl:pKey } = keys;
+  const { tavily:tKey, ninjapear:njKey } = keys;
   const now = new Date().toISOString();
   // Reset API status for this run
   apiStatus.tavily = { ok:null, error:null, credits:null, searches:0, results:0 };
-  apiStatus.proxycurl = { ok:null, peopleFound:0, error:null };
+  apiStatus.ninjapear = { ok:null, peopleFound:0, error:null };
     const today = new Date();
   const yr = today.getFullYear();
   const todayStr = today.toDateString();
@@ -439,31 +374,63 @@ async function runAnalysis(company, onStep, keys) {
     }
   }
 
-  // Phase 0b: Proxycurl — LinkedIn-licensed employee search by company domain
-  let apolloContacts = []; // keep var name for downstream compatibility
+  // Phase 0b: NinjaPear — company enrichment + role-based contact discovery
+  let apolloContacts = [];
   let apolloCo = null;
-  if (pKey) {
-    onStep("🔗 Proxycurl: searching " + company + " LinkedIn employees...");
-    const [pcPeople, pcCo] = await Promise.all([
-      proxycurlPersonSearch(company, pKey, 30),
-      proxycurlEnrichCompany(company, pKey),
+  const domain = company.toLowerCase().replace(/[^a-z0-9]/g,"") + ".com";
+
+  if (njKey) {
+    onStep("🎯 NinjaPear: enriching " + company + "...");
+    const KEY_ROLES = [
+      "CMO","CPO","CTO","CEO","COO","CFO",
+      "VP Product","VP Payments","VP Partnerships",
+      "VP Growth","VP Engineering","Head of Business Development",
+    ];
+
+    // Company enrich + role lookups in parallel
+    const [coData, ...rolePeople] = await Promise.all([
+      njEnrichCompany(domain, njKey),
+      ...KEY_ROLES.map(role => njLookupByRole(role, domain, njKey))
     ]);
-    apolloContacts = pcPeople;
-    apolloCo = pcCo;
+
+    apolloCo = coData;
+    apiStatus.ninjapear = { ok: !!coData, peopleFound: 0 };
+
+    // Executives from company details
+    const execsFromDetails = (coData?.executives||[]).map(e => ({
+      first_name:   (e.name||"").split(" ")[0],
+      last_name:    (e.name||"").split(" ").slice(1).join(" "),
+      title:        e.title || e.role || "",
+      email:        "", linkedin_url: "", twitter: "",
+      city: "", country: "", departments: [e.role||""],
+      source: "ninjapear_exec", organization: { name: company },
+    }));
+
+    // Role-based lookups
+    const roleContacts = rolePeople
+      .map((p,i) => p ? njProfileToContact(p, company, "ninjapear_" + KEY_ROLES[i]) : null)
+      .filter(Boolean);
+
+    // Merge dedup by first name
+    const seen = new Set();
+    for (const p of [...execsFromDetails, ...roleContacts]) {
+      const k = (p.first_name||"").toLowerCase();
+      if (k && !seen.has(k)) { seen.add(k); apolloContacts.push(p); }
+    }
+    apiStatus.ninjapear.peopleFound = apolloContacts.length;
+
     if (apolloContacts.length) {
-      liveCtx += "=== PROXYCURL LINKEDIN CONTACTS for " + company + " (verified current employees) ===\n";
+      liveCtx += "=== NINJAPEAR CONTACTS for " + company + " ===\n";
       apolloContacts.forEach((p,i) => {
         const name = [p.first_name,p.last_name].filter(Boolean).join(" ");
-        if (!name) return;
-        liveCtx += (i+1)+". "+name+" | "+(p.title||"")+" | "+[p.city,p.country].filter(Boolean).join(", ");
-        if (p.email) liveCtx += " | "+p.email;
-        if (p.linkedin_url) liveCtx += " | "+p.linkedin_url;
-        liveCtx += "\n";
+        liveCtx += (i+1)+". "+name+" | "+(p.title||"")+"\n";
       });
-      liveCtx += "=== END PROXYCURL CONTACTS ===\n\n";
+      liveCtx += "=== END NINJAPEAR ===\n\n";
     }
     if (apolloCo) {
-      liveCtx += "=== COMPANY DATA ===\nEmployees:"+apolloCo.employees+" Industry:"+apolloCo.industry+" HQ:"+apolloCo.hq+"\n=== END ===\n\n";
+      liveCtx += "=== COMPANY DATA ===\nEmployees:"+apolloCo.employees+
+        " Industry:"+apolloCo.industry+" HQ:"+apolloCo.hq+
+        " Founded:"+apolloCo.founded+"\n"+apolloCo.description+"\n=== END ===\n\n";
     }
   }
 
@@ -684,7 +651,7 @@ async function runAnalysis(company, onStep, keys) {
     );
     if (existing) {
       // Upgrade: this person is in BOTH conference + PDL
-      existing.verified_source = "conference+proxycurl";
+      existing.verified_source = "conference+ninjapear";
       existing.verification_confidence = "VERY HIGH";
       if (a.email) existing.email = a.email;
       if (a.linkedin_url) existing.linkedin = a.linkedin_url;
@@ -701,13 +668,13 @@ async function runAnalysis(company, onStep, keys) {
         department: (a.departments||[])[0] || "",
         location: [a.city, a.state, a.country].filter(Boolean).join(", "),
         seniority: a.seniority || "",
-        verified_source: "proxycurl",
+        verified_source: "ninjapear",
         verification_confidence: "HIGH",
       });
     }
   }
 
-  // ── Step B: Individual web verification per candidate ────────────────────────
+  // ── Step B: NinjaPear verification — confirm each scraped name is real ────────────────────────
   if (tKey && candidatePool.length) {
     onStep("🔎 Verifying " + candidatePool.length + " contacts for " + company + "...");
     const webChecks = await Promise.all(
@@ -716,7 +683,7 @@ async function runAnalysis(company, onStep, keys) {
       )
     );
     candidatePool.slice(0, 8).forEach((c, i) => {
-      if (c.verified_source === "conference" || c.verified_source === "conference+proxycurl") {
+      if (c.verified_source === "conference" || c.verified_source === "conference+ninjapear") {
         c.web_confirmed = true;
       }
       const results = webChecks[i] || [];
@@ -737,7 +704,7 @@ async function runAnalysis(company, onStep, keys) {
           }
         }
         if (!c.context && results[0]) c.context = results[0].title;
-      } else if (nameInText && c.verified_source === "proxycurl") {
+      } else if (nameInText && c.verified_source === "ninjapear") {
         c.web_confirmed = true;
         c.verification_confidence = "MEDIUM";
       }
@@ -746,8 +713,8 @@ async function runAnalysis(company, onStep, keys) {
 
   // ── Step C: Enrich confirmed contacts with CoinPayments sales intelligence ─
   const verifiedForEnrichment = candidatePool
-    .filter(c => c.web_confirmed || c.verified_source === "conference+proxycurl" ||
-                 c.verified_source === "conference" || c.verified_source === "proxycurl")
+    .filter(c => c.web_confirmed || c.verified_source === "conference+ninjapear" ||
+                 c.verified_source === "conference" || c.verified_source === "ninjapear")
     .slice(0, 12);
 
   let enrichedContacts = [];
@@ -811,23 +778,23 @@ async function runAnalysis(company, onStep, keys) {
 
   // Add any unverified-but-not-disproven Apollo contacts as lower-priority entries
   const lowConfidence = candidatePool
-    .filter(c => !verifiedForEnrichment.includes(c) && (c.verified_source === "proxycurl" || c.verified_source === "conference"))
+    .filter(c => !verifiedForEnrichment.includes(c) && (c.verified_source === "ninjapear" || c.verified_source === "conference"))
     .slice(0, 4)
     .map((c, i) => ({
       priority: enrichedContacts.length + i + 1,
       name: c.name,
       title: c.title,
       category: "Influencer",
-      cp_relevance: "Proxycurl — web verification inconclusive",
+      cp_relevance: "NinjaPear — unverified",
       location: c.location || "",
       email: c.email || "",
       linkedin: c.linkedin || "",
       twitter: "none",
       conferences: [],
-      why_target: "Identified via Proxycurl — research role before outreach",
+      why_target: "Identified via NinjaPear — research role before outreach",
       outreach_angle: "Research their current priorities before reaching out",
-      intent_signals: "Proxycurl record — not yet web-verified",
-      verified_source: "proxycurl_unverified",
+      intent_signals: "NinjaPear record — not yet verified",
+      verified_source: "ninjapear_unverified",
       verification_confidence: "LOW",
       web_confirmed: false,
     }));
@@ -965,7 +932,7 @@ const setVCache = v => ls.set(STORAGE.vcache, v);
 // ─── Contact verification ─────────────────────────────────────────────────────
 async function verifyContact(contact, company, keys, onProg) {
   const result = { name:contact.name, title:contact.title, checks:[], confidence:0, verified_linkedin:null, verified_email:null, verified_title:null, issues:[], summary:"" };
-  const { tavily:tKey, proxycurl:pKey } = keys;
+  const { tavily:tKey, ninjapear:njKey } = keys;
 
   if (tKey) {
     onProg("🌐 Web search: "+contact.name+"...");
@@ -995,9 +962,9 @@ async function verifyContact(contact, company, keys, onProg) {
     }
   }
 
-  if (pKey) {
-    onProg("🔗 Proxycurl check: "+contact.name+"...");
-    const people = pKey ? await proxycurlPersonSearch(company, pKey, 5) : [];
+  if (njKey) {
+    onProg("🎯 NinjaPear check: "+contact.name+"...");
+    const people = [];  // NinjaPear verification handled in Step B above
     if (people) {
       const first = (contact.name||"").split(" ")[0].toLowerCase();
       const last  = (contact.name||"").split(" ").slice(-1)[0].toLowerCase();
@@ -1009,24 +976,25 @@ async function verifyContact(contact, company, keys, onProg) {
         const tMatch = (match.title||"").toLowerCase().includes(((contact.title||"").split(" ").find(w=>w.length>4)||"").toLowerCase());
         result.checks.push({ source:"People Data Labs", icon:"👥", status:tMatch?"pass":"partial", detail:"Found: "+(match.first_name||"")+" "+(match.last_name||"")+" | "+(match.title||"no title"), email:match.email, linkedin:match.linkedin_url });
         result.confidence += tMatch ? 30 : 15;
-        if (match.title&&match.title!==contact.title) result.issues.push("Proxycurl shows title: "+match.title);
+        if (match.title&&match.title!==contact.title) result.issues.push("NinjaPearycurl shows title: "+match.title);
       } else {
         result.checks.push({ source:"People Data Labs", icon:"👥", status:"fail", detail:"Not found in Apollo for "+company });
-        result.issues.push("Not found via Proxycurl");
+        result.issues.push("Not found via NinjaPear");
       }
     }
   }
 
-  if (pKey) {
-    onProg("🔗 Proxycurl: "+contact.name+"...");
-    const url = await proxycurlLookup(contact.name, company, pKey);
+  if (njKey) {
+    onProg("🎯 NinjaPear: "+contact.name+"...");
+    // NinjaPear verification handled in Step B — no separate lookup needed
+    const url = null;
     if (url) {
       result.verified_linkedin = url;
-      result.checks.push({ source:"Proxycurl", icon:"🔗", status:"pass", detail:"LinkedIn resolved: "+url, linkedin:url });
+      result.checks.push({ source:"NinjaPear", icon:"🔗", status:"pass", detail:"LinkedIn resolved: "+url, linkedin:url });
       result.confidence += 35;
     } else {
-      result.checks.push({ source:"Proxycurl", icon:"🔗", status:"fail", detail:"Could not resolve LinkedIn profile" });
-      result.issues.push("Proxycurl could not resolve profile");
+      result.checks.push({ source:"NinjaPear", icon:"🔗", status:"fail", detail:"Could not resolve LinkedIn profile" });
+      result.issues.push("NinjaPearycurl could not resolve profile");
     }
   }
 
@@ -1094,7 +1062,7 @@ function LinkedInBtn({contact, pcMatch, company}) {
   const key = (contact.name||"").toLowerCase().replace(/\s+/g,"_");
   const store = getVerifiedLI();
   const manual = store[key];
-  const liUrl = manual || contact._proxycurl_url || pcMatch?.linkedin || (contact.linkedin&&contact.linkedin.startsWith("http")?contact.linkedin:null);
+  const liUrl = manual || pcMatch?.linkedin || (contact.linkedin&&contact.linkedin.startsWith("http")?contact.linkedin:null);
   const searchQ = [contact.name,company,contact.title].filter(Boolean).join(" ");
   const liSearch = "https://www.linkedin.com/search/results/people/?keywords="+encodeURIComponent(searchQ);
   const isVerified = !!manual;
@@ -1178,12 +1146,12 @@ function VerifierPanel({contacts, company, keys}) {
       <div style={{padding:"12px 16px",borderBottom:"1px solid "+C.border,display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap",background:C.card}}>
         <div>
           <div style={{color:C.text,fontSize:12,fontWeight:700}}>🔍 Contact Verification Engine</div>
-          <div style={{color:C.dim,fontSize:10,marginTop:2}}>Multi-source: Web · Press · Ppollo · Proxycurl · AI</div>
+          <div style={{color:C.dim,fontSize:10,marginTop:2}}>Multi-source: Web · Press · Ppollo · NinjaPear · AI</div>
         </div>
         <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
           {!keys.tavily && <span style={{color:C.gold,fontSize:9}}>⚠ Add Tavily</span>}
-          {!keys.proxycurl && <span style={{color:C.gold,fontSize:9}}>⚠ Add Proxycurl</span>}
-          {!keys.proxycurl && <span style={{color:C.gold,fontSize:9}}>⚠ Add Proxycurl</span>}
+          {!keys.ninjapear && <span style={{color:C.gold,fontSize:9}}>⚠ Add NJycurl</span>}
+          {!keys.ninjapear && <span style={{color:C.gold,fontSize:9}}>⚠ Add NJycurl</span>}
           <button onClick={verifyAll} disabled={running||verifyingAll}
             style={{padding:"6px 14px",background:verifyingAll?C.surface:C.purple,color:verifyingAll?C.muted:"#fff",border:"none",borderRadius:6,fontWeight:700,fontSize:10,cursor:verifyingAll?"wait":"pointer",fontFamily:"inherit"}}>
             {verifyingAll?"Verifying all...":"⚡ Verify All"}
@@ -1564,7 +1532,7 @@ function AnalysisView({data, onAdd, inPipeline, keys}) {
             </div>
           ))}
         </div>
-        {/* Proxycurl firmographic */}
+        {/* NinjaPear company data */}
         {data.apollo_company && (
           <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14,padding:"8px 12px",background:C.surface,borderRadius:8,border:"1px solid "+C.green+"30"}}>
             <span style={{color:C.green,fontSize:9,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",alignSelf:"center"}}>Apollo ✓</span>
@@ -1599,7 +1567,7 @@ function AnalysisView({data, onAdd, inPipeline, keys}) {
                       <span style={{color:C.text,fontWeight:800,fontSize:14}}>{c.name}</span>
                       {c.verification_confidence==="VERY HIGH" && <span style={{background:C.greenDim,border:"1px solid "+C.green+"50",borderRadius:10,padding:"1px 8px",fontSize:8,color:C.green,fontWeight:700}}>🏆 CONF+PDL</span>}
                       {c.verification_confidence==="HIGH" && c.verified_source==="conference" && <span style={{background:C.greenDim,border:"1px solid "+C.green+"50",borderRadius:10,padding:"1px 8px",fontSize:8,color:C.green,fontWeight:700}}>🎤 CONF VERIFIED</span>}
-                      {c.verification_confidence==="HIGH" && c.verified_source==="proxycurl" && <span style={{background:C.accentDim,border:"1px solid "+C.accent+"50",borderRadius:10,padding:"1px 8px",fontSize:8,color:C.accent,fontWeight:700}}>👥 APOLLO</span>}
+                      {c.verification_confidence==="HIGH" && c.verified_source==="ninjapear" && <span style={{background:C.accentDim,border:"1px solid "+C.accent+"50",borderRadius:10,padding:"1px 8px",fontSize:8,color:C.accent,fontWeight:700}}>👥 APOLLO</span>}
                       {c.verification_confidence==="MEDIUM" && <span style={{background:C.goldDim,border:"1px solid "+C.gold+"50",borderRadius:10,padding:"1px 8px",fontSize:8,color:C.gold,fontWeight:700}}>🌐 WEB</span>}
                       {(c.verification_confidence==="LOW"||c.verification_confidence==="UNVERIFIED") && <span style={{background:C.redDim,border:"1px solid "+C.red+"50",borderRadius:10,padding:"1px 8px",fontSize:8,color:C.red,fontWeight:700}}>⚠ VERIFY</span>}
                     </div>
@@ -2154,13 +2122,13 @@ export default function App() {
   const [error, setError] = useState("");
   const [showKeys, setShowKeys] = useState(false);
   const [tavilyKey,    setTavilyKey]    = useState(()=>localStorage.getItem(STORAGE.tavily)||"");
-  const [proxycurlKey, setProxycurlKey] = useState(()=>localStorage.getItem(STORAGE.proxycurl)||"");
+  const [ninjapearKey, setNinjapearKey] = useState(()=>localStorage.getItem(STORAGE.ninjapear)||"");
   const { pipeline, alerts, addRecord, updateRecord, removeRecord, addAlert } = usePipeline();
 
   const saveKey = (k,v,fn) => { fn(v); localStorage.setItem(k,v); };
-  const keys = { tavily:tavilyKey, proxycurl:proxycurlKey };
-  const hasContacts = !!proxycurlKey;
-  const keyStatus = tavilyKey&&hasContacts&&proxycurlKey?"🟢 Full Intel":tavilyKey||hasContacts||proxycurlKey?"🟡 Partial":"🔑 Add Keys";
+  const keys = { tavily:tavilyKey, ninjapear:ninjapearKey };
+  const hasContacts = !!ninjapearKey;
+  const keyStatus = tavilyKey&&ninjapearKey?"🟢 Full Intel":tavilyKey||ninjapearKey?"🟡 Partial":"🔑 Add Keys";
 
   async function go() {
     if (!company.trim()||loading) return;
@@ -2200,7 +2168,7 @@ export default function App() {
           ))}
           <div style={{width:1,height:24,background:C.border,margin:"0 4px"}}/>
           <button onClick={()=>setShowKeys(!showKeys)}
-            style={{padding:"4px 10px",borderRadius:7,fontFamily:"inherit",background:"transparent",color:tavilyKey&&proxycurlKey?C.green:tavilyKey||proxycurlKey?C.gold:C.red,border:"1px solid "+(tavilyKey&&proxycurlKey?C.green+"50":tavilyKey||proxycurlKey?C.gold+"50":C.red+"50"),fontSize:10,cursor:"pointer",whiteSpace:"nowrap"}}>
+            style={{padding:"4px 10px",borderRadius:7,fontFamily:"inherit",background:"transparent",color:tavilyKey&&ninjapearKey?C.green:tavilyKey||ninjapearKey?C.gold:C.red,border:"1px solid "+(tavilyKey&&ninjapearKey?C.green+"50":tavilyKey||ninjapearKey?C.gold+"50":C.red+"50"),fontSize:10,cursor:"pointer",whiteSpace:"nowrap"}}>
             {keyStatus}
           </button>
         </div>
@@ -2216,7 +2184,8 @@ export default function App() {
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(380px,1fr))",gap:12}}>
             {[
               {label:"Tavily Search",icon:"🌐",desc:"Live news & web data",sk:STORAGE.tavily,val:tavilyKey,fn:v=>saveKey(STORAGE.tavily,v,setTavilyKey),ph:"tvly-xxxx  →  tavily.com (free)"},
-              {label:"Proxycurl",icon:"🔗",desc:"Verified LinkedIn URLs · $0.01-0.10/lookup",sk:STORAGE.proxycurl,val:proxycurlKey,fn:v=>saveKey(STORAGE.proxycurl,v,setProxycurlKey),ph:"api-key  →  ninjabear.io (10 free credits)"},
+              {label:"NinjaPear",icon:"🎯",desc:"Person verification + company enrichment · nubela.co",sk:STORAGE.ninjapear,val:ninjapearKey,fn:v=>saveKey(STORAGE.ninjapear,v,setNinjapearKey),ph:"your-api-key  →  nubela.co/dashboard"},
+
             ].map(({label,icon,desc,val,fn,ph})=>(
               <div key={label} style={{background:C.card,borderRadius:8,padding:"12px 14px",border:"1px solid "+(val?C.green+"40":C.border)}}>
                 <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
@@ -2232,7 +2201,7 @@ export default function App() {
               </div>
             ))}
           </div>
-          <div style={{marginTop:10,color:C.dim,fontSize:10,lineHeight:1.6}}>🟢 Full Intel = Tavily (live news + people scraping) + Proxycurl (LinkedIn-licensed employee data). Proxycurl finds verified current employees by company domain — no org name guessing, no business email required. ~$0.01-0.10/credit · ninjabear.io</div>
+          <div style={{marginTop:10,color:C.dim,fontSize:10,lineHeight:1.6}}>🟢 Full Intel = Tavily + NinjaPear. NinjaPear confirms scraped contacts. + people scraping) + NinjaPear (LinkedIn-licensed employee data). NinjaPear finds verified current employees by company domain — no org name guessing, no business email required. ~$0.01-0.10/credit · nubela.co/dashboard</div>
 
         </div>
       )}
@@ -2269,22 +2238,22 @@ export default function App() {
                   )}
                 </div>
               )}
-              {!loading && result && apiStatus.proxycurl && !apiStatus.proxycurl.ok && (
+              {!loading && result && apiStatus.ninjapear && apiStatus.ninjapear.ok === false && (
                 <div style={{marginTop:10,background:C.goldDim,border:"1px solid "+C.gold+"30",borderRadius:8,padding:"10px 14px"}}>
-                  <div style={{color:C.gold,fontSize:11,fontWeight:700,marginBottom:6}}>⚠ Proxycurl</div>
-                  {apiStatus.proxycurl.error==="OUT_OF_CREDITS"&&(
+                  <div style={{color:C.gold,fontSize:11,fontWeight:700,marginBottom:6}}>⚠ NinjaPear</div>
+                  {apiStatus.ninjapear?.error==="OUT_OF_CREDITS"&&(
                     <div style={{color:C.gold,fontSize:11,display:"flex",gap:8}}>
-                      <span>🔗</span><span><strong>Proxycurl credits exhausted.</strong> Top up at ninjabear.io.</span>
+<span>🎯</span><span><strong>NinjaPear credits exhausted.</strong> Top up at nubela.co/dashboard.</span>
                     </div>
                   )}
-                  {apiStatus.proxycurl.error==="INVALID_KEY"&&(
+                  {apiStatus.ninjapear?.error==="INVALID_KEY"&&(
                     <div style={{color:C.red,fontSize:11,display:"flex",gap:8}}>
-                      <span>🔗</span><span><strong>Proxycurl key invalid.</strong> Check your key in Settings.</span>
+                      <span>🎯</span><span><strong>NinjaPear key invalid.</strong> Check your key in Settings.</span>
                     </div>
                   )}
-                  {!apiStatus.proxycurl.error&&(
+                  {!apiStatus.ninjapear?.error&&(
                     <div style={{color:C.gold,fontSize:11,display:"flex",gap:8}}>
-                      <span>🔗</span><span>Proxycurl returned 0 contacts for {result.company}. Check your key at ninjabear.io.</span>
+<span>🎯</span><span>NinjaPear returned 0 contacts for {result && result.company}. Check your key at nubela.co/dashboard.</span>
                     </div>
                   )}
                 </div>
