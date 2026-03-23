@@ -9,7 +9,7 @@ B2B Sales Intelligence Platform — deploy to Vercel in 10 minutes.
 2. Click "Add New Project"
 3. Click "Upload" or drag this entire folder to the Vercel dashboard
 4. Vercel detects Vite automatically
-5. Click Deploy
+5. Click Deploy 
 6. Done — you get a live URL like `coinpayments-agent.vercel.app`
 
 ### Option B: GitHub (Permanent + Auto-updates)
