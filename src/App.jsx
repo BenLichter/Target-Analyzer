@@ -258,48 +258,53 @@ async function proxycurlPersonSearch(company, key, size) {
   if (!key) return [];
   try {
     const domain = company.toLowerCase().replace(/[^a-z0-9]/g, "") + ".com";
-    const roles = ["VP","Director","Head","Chief","President","Partner","Lead","Manager"];
-    const titleQuery = roles.map(r => r + " at " + company).join(" OR ");
-    
+
+    // Use the Employee List endpoint — more reliable than person search
     const res = await fetch("/api/proxycurl", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ endpoint: "search/person/", key, params: {
-        current_company_domain: domain,
-        headline: "VP OR Director OR Head OR Chief OR President OR Lead",
-        page_size: String(size || 25),
-        enrich_profiles: "enrich",
-      } })
+      body: JSON.stringify({
+        endpoint: "linkedin/company/employees/",
+        key,
+        params: {
+          company_domain: domain,
+          employment_status: "current",
+          page_size: String(size || 25),
+          enrich_profiles: "enrich",
+          use_cache: "if-present",
+        }
+      })
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      console.warn("[Proxycurl] Person search failed:", res.status, err);
+      console.warn("[Proxycurl] Employee list failed:", res.status, err);
       apiStatus.proxycurl = { ok: false, error: res.status === 402 ? "OUT_OF_CREDITS" : res.status === 401 ? "INVALID_KEY" : "ERROR_" + res.status, peopleFound: 0 };
       return [];
     }
     const data = await res.json();
-    const results = data.results || [];
-    console.log("[Proxycurl] Person search found", results.length, "for", domain);
-    apiStatus.proxycurl = { ok: true, peopleFound: results.length };
+    const employees = data.employees || [];
+    console.log("[Proxycurl] Found", employees.length, "employees for", domain);
+    apiStatus.proxycurl = { ok: true, peopleFound: employees.length };
 
-    return results.map(r => {
-      const p = r.linkedin_profile || {};
-      const exp = (p.experiences || []).find(e => e.company && e.company.toLowerCase().includes(company.toLowerCase()) && !e.ends_at);
+    // Each employee record has profile data when enrich_profiles=enrich
+    return employees.map(e => {
+      const p = e.profile || {};
+      const exp = (p.experiences || []).find(ex => ex.company && ex.company.toLowerCase().includes(company.toLowerCase()) && !ex.ends_at);
       return {
         first_name: (p.first_name || "").trim(),
         last_name:  (p.last_name  || "").trim(),
         title:       exp?.title || p.occupation || "",
-        email:       r.email || "",
-        linkedin_url: r.linkedin_profile_url || "",
+        email:       p.personal_emails?.[0] || "",
+        linkedin_url: e.profile_url || "",
         city:        p.city || "",
         country:     p.country_full_name || "",
         departments: [exp?.title || ""],
         seniority:   "",
         sanitized_phone: "",
         organization: { name: company },
-        source: "proxycurl_search",
+        source: "proxycurl_employees",
       };
-    }).filter(p => p.first_name || p.last_name);
+    }).filter(p => p.first_name || p.last_name || p.linkedin_url);
   } catch(e) {
     console.warn("[Proxycurl] Exception:", e.message);
     apiStatus.proxycurl = { ok: false, error: e.message, peopleFound: 0 };
