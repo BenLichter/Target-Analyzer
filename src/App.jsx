@@ -53,7 +53,7 @@ function usePipeline() {
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
 async function callAPI(system, user, maxTokens) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetch("/api/anthropic", {
     method:"POST", headers:{"Content-Type":"application/json"},
     body:JSON.stringify({ model:MODEL, max_tokens:maxTokens||6000, system, messages:[{role:"user",content:user}] }),
   });
@@ -218,11 +218,11 @@ async function proxycurlEmployeeSearch(company, key, size) {
       resolve_numeric_id: "false",
     });
     // Proxycurl Employee Listing endpoint
-    const res = await fetch(
-      "https://nubela.co/proxycurl/api/linkedin/company/employees/?" +
-      new URLSearchParams({ company_domain: domain, employment_status: "current", page_size: String(size||25) }),
-      { headers: { "Authorization": "Bearer " + key } }
-    );
+    const res = await fetch("/api/proxycurl", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ endpoint: "linkedin/company/employees/", key, params: { company_domain: domain, employment_status: "current", page_size: String(size||25) } })
+    });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       console.warn("[Proxycurl] Employee search failed:", res.status, err);
@@ -261,13 +261,15 @@ async function proxycurlPersonSearch(company, key, size) {
     const roles = ["VP","Director","Head","Chief","President","Partner","Lead","Manager"];
     const titleQuery = roles.map(r => r + " at " + company).join(" OR ");
     
-    const res = await fetch("https://nubela.co/proxycurl/api/search/person/?" + new URLSearchParams({
-      current_company_domain: domain,
-      headline: "VP OR Director OR Head OR Chief OR President OR Lead",
-      page_size: String(size || 25),
-      enrich_profiles: "enrich",  // get full profile data including name/title
-    }), {
-      headers: { "Authorization": "Bearer " + key }
+    const res = await fetch("/api/proxycurl", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ endpoint: "search/person/", key, params: {
+        current_company_domain: domain,
+        headline: "VP OR Director OR Head OR Chief OR President OR Lead",
+        page_size: String(size || 25),
+        enrich_profiles: "enrich",
+      } })
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
