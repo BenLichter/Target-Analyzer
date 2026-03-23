@@ -96,7 +96,7 @@ async function tavilySearch(query, key, n, maxAgeDays) {
       exclude_domains: BLOCKED_DOMAINS,
     };
     if (maxAgeDays) body.days = maxAgeDays;
-    const res = await fetch("https://api.tavily.com/search", {
+    const res = await fetch("/api/tavily", {
       method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify(body),
     });
@@ -169,7 +169,7 @@ async function tavilySearchRaw(query, key, n, maxAgeDays) {
       exclude_domains: BLOCKED_DOMAINS,
     };
     if (maxAgeDays) body.days = maxAgeDays;
-    const res = await fetch("https://api.tavily.com/search", {
+    const res = await fetch("/api/tavily", {
       method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify(body),
     });
@@ -311,22 +311,21 @@ async function proxycurlEnrichCompany(company, key) {
   try {
     const domain = company.toLowerCase().replace(/[^a-z0-9]/g, "") + ".com";
     // First find company LinkedIn URL, then enrich
-    const findRes = await fetch("https://nubela.co/proxycurl/api/linkedin/company/resolve?" + new URLSearchParams({
-      company_domain: domain,
-    }), { headers: { "Authorization": "Bearer " + key } });
+    const findRes = await fetch("/api/proxycurl", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ endpoint: "linkedin/company/resolve", key, params: { company_domain: domain } })
+    });
     if (!findRes.ok) return null;
     const findData = await findRes.json();
     const linkedinUrl = findData.url;
     if (!linkedinUrl) return null;
 
-    const enrichRes = await fetch("https://nubela.co/proxycurl/api/linkedin/company?" + new URLSearchParams({
-      url: linkedinUrl,
-      categories: "exclude",
-      funding_data: "include",
-      exit_data: "exclude",
-      acquisitions: "exclude",
-      extra: "include",
-    }), { headers: { "Authorization": "Bearer " + key } });
+    const enrichRes = await fetch("/api/proxycurl", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ endpoint: "linkedin/company", key, params: { url: linkedinUrl, categories: "exclude", funding_data: "include", exit_data: "exclude", acquisitions: "exclude", extra: "include" } })
+    });
     if (!enrichRes.ok) return null;
     const d = await enrichRes.json();
     return {
@@ -350,7 +349,11 @@ async function proxycurlLookup(name, company, key) {
   if (!key) return null;
   try {
     const params = new URLSearchParams({ first_name:name.split(" ")[0]||"", last_name:name.split(" ").slice(1).join(" ")||"", company_domain:company.toLowerCase().replace(/\s+/g,"")+".com", similarity_checks:"include", enrich_profile:"skip" });
-    const res = await fetch("https://nubela.co/proxycurl/api/linkedin/profile/resolve?"+params, { headers:{"Authorization":"Bearer "+key} });
+    const res = await fetch("/api/proxycurl", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ endpoint: "linkedin/profile/resolve", key, params: Object.fromEntries(params) })
+    });
     if (!res.ok) return null;
     const data = await res.json();
     return data.url||null;
