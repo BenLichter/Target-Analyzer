@@ -9,6 +9,7 @@ const STORAGE = {
   ninjapear:"cp_ninjapear_key",
   verified: "cp_verified_li_v2",
   vcache:   "cp_verify_cache_v2",
+  analysis: "cp_analysis_v1",
 };
 
 const C = {
@@ -2118,7 +2119,8 @@ export default function App() {
   const [company, setCompany] = useState("");
   const [loading, setLoading] = useState(false);
   const [step, setStep] = useState("");
-  const [result, setResult] = useState(null);
+  const [result, setResultRaw] = useState(() => ls.get(STORAGE.analysis) || null);
+  const setResult = useCallback(v => { setResultRaw(v); if (v) ls.set(STORAGE.analysis, v); else ls.set(STORAGE.analysis, null); }, []);
   const [error, setError] = useState("");
   const [showKeys, setShowKeys] = useState(false);
   const [tavilyKey,    setTavilyKey]    = useState(()=>localStorage.getItem(STORAGE.tavily)||"");
