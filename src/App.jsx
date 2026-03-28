@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MODEL = "claude-sonnet-4-20250514";
@@ -10,6 +10,7 @@ const STORAGE = {
   verified: "cp_verified_li_v2",
   vcache:   "cp_verify_cache_v2",
   analysis: "cp_analysis_v1",
+  syncId:   "cp_sync_id",
 };
 
 const C = {
@@ -49,7 +50,7 @@ function usePipeline() {
   const updateRecord= useCallback((company,updates) => { setPipeline(prev => prev.map(r => norm(r.company)===norm(company)?{...r,...updates}:r)); }, [setPipeline]);
   const removeRecord= useCallback(company => { setPipeline(prev => prev.filter(r => norm(r.company)!==norm(company))); }, [setPipeline]);
   const addAlert    = useCallback(a  => { setAlerts(prev => [a,...prev.slice(0,99)]); }, [setAlerts]);
-  return { pipeline, alerts, addRecord, updateRecord, removeRecord, addAlert };
+  return { pipeline, setPipeline, alerts, setAlerts, addRecord, updateRecord, removeRecord, addAlert };
 }
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
@@ -2125,9 +2126,48 @@ export default function App() {
   const [showKeys, setShowKeys] = useState(false);
   const [tavilyKey,    setTavilyKey]    = useState(()=>localStorage.getItem(STORAGE.tavily)||"");
   const [ninjapearKey, setNinjapearKey] = useState(()=>localStorage.getItem(STORAGE.ninjapear)||"");
-  const { pipeline, alerts, addRecord, updateRecord, removeRecord, addAlert } = usePipeline();
+  const { pipeline, setPipeline, alerts, setAlerts, addRecord, updateRecord, removeRecord, addAlert } = usePipeline();
+  const [syncId, setSyncIdRaw] = useState(() => ls.get(STORAGE.syncId) || null);
+  const setSyncId = useCallback(v => { setSyncIdRaw(v); ls.set(STORAGE.syncId, v); }, []);
+  const [syncStatus, setSyncStatus] = useState("");
+  const syncTimer = useRef(null);
 
   const saveKey = (k,v,fn) => { fn(v); localStorage.setItem(k,v); };
+
+  const syncLoad = useCallback(async (id) => {
+    if (!id) return;
+    setSyncStatus("loading");
+    try {
+      const r = await fetch(`/api/sync?id=${encodeURIComponent(id)}`);
+      if (!r.ok) throw new Error(r.status);
+      const data = await r.json();
+      if (Array.isArray(data.pipeline)) setPipeline(data.pipeline);
+      if (Array.isArray(data.alerts)) setAlerts(data.alerts);
+      setSyncStatus("loaded");
+      setTimeout(() => setSyncStatus(""), 2000);
+    } catch { setSyncStatus("error"); setTimeout(() => setSyncStatus(""), 3000); }
+  }, [setPipeline, setAlerts]);
+
+  // Auto-load on mount if sync is enabled
+  useEffect(() => { if (syncId) syncLoad(syncId); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-save 3 s after last pipeline/alerts change
+  useEffect(() => {
+    if (!syncId) return;
+    clearTimeout(syncTimer.current);
+    syncTimer.current = setTimeout(async () => {
+      setSyncStatus("saving");
+      try {
+        await fetch(`/api/sync?id=${encodeURIComponent(syncId)}`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pipeline, alerts }),
+        });
+        setSyncStatus("saved");
+        setTimeout(() => setSyncStatus(""), 3000);
+      } catch { setSyncStatus("error"); setTimeout(() => setSyncStatus(""), 3000); }
+    }, 3000);
+    return () => clearTimeout(syncTimer.current);
+  }, [pipeline, alerts, syncId]); // eslint-disable-line react-hooks/exhaustive-deps
   const keys = { tavily:tavilyKey, ninjapear:ninjapearKey };
   const hasContacts = !!ninjapearKey;
   const keyStatus = tavilyKey&&ninjapearKey?"🟢 Full Intel":tavilyKey||ninjapearKey?"🟡 Partial":"🔑 Add Keys";
@@ -2204,6 +2244,47 @@ export default function App() {
             ))}
           </div>
           <div style={{marginTop:10,color:C.dim,fontSize:10,lineHeight:1.6}}>🟢 Full Intel = Tavily + NinjaPear. NinjaPear confirms scraped contacts. + people scraping) + NinjaPear (LinkedIn-licensed employee data). NinjaPear finds verified current employees by company domain — no org name guessing, no business email required. ~$0.01-0.10/credit · nubela.co/dashboard</div>
+
+          {/* Cloud Sync */}
+          <div style={{marginTop:14,paddingTop:14,borderTop:"1px solid "+C.border}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+              <span style={{color:C.text,fontSize:11,fontWeight:700}}>☁ Cloud Sync</span>
+              {syncStatus==="saving"  && <span style={{color:C.gold, fontSize:9,fontWeight:700}}>⟳ SAVING...</span>}
+              {syncStatus==="saved"   && <span style={{color:C.green,fontSize:9,fontWeight:700}}>✓ SYNCED</span>}
+              {syncStatus==="loading" && <span style={{color:C.gold, fontSize:9,fontWeight:700}}>⟳ LOADING...</span>}
+              {syncStatus==="loaded"  && <span style={{color:C.green,fontSize:9,fontWeight:700}}>✓ LOADED</span>}
+              {syncStatus==="error"   && <span style={{color:C.red,  fontSize:9,fontWeight:700}}>✗ ERROR</span>}
+            </div>
+            {!syncId ? (
+              <div>
+                <div style={{color:C.dim,fontSize:10,marginBottom:8}}>Sync your pipeline across devices using a shared ID.</div>
+                <button onClick={()=>setSyncId(crypto.randomUUID())}
+                  style={{padding:"6px 14px",background:C.accent,color:"#000",border:"none",borderRadius:6,fontWeight:700,fontSize:10,cursor:"pointer",fontFamily:"inherit"}}>
+                  Enable Cloud Sync
+                </button>
+              </div>
+            ) : (
+              <div>
+                <div style={{color:C.dim,fontSize:10,marginBottom:6}}>Your Sync ID — copy to another device to share this pipeline:</div>
+                <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:8}}>
+                  <code style={{flex:1,background:C.surface,border:"1px solid "+C.border,borderRadius:5,padding:"5px 8px",fontSize:9,color:C.accent,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{syncId}</code>
+                  <button onClick={()=>navigator.clipboard.writeText(syncId)}
+                    style={{padding:"5px 10px",background:"transparent",border:"1px solid "+C.dim,color:C.muted,borderRadius:5,fontSize:10,cursor:"pointer",fontFamily:"inherit",flexShrink:0}}>
+                    Copy
+                  </button>
+                </div>
+                <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                  <input placeholder="Paste Sync ID from another device + Enter"
+                    onKeyDown={e=>{if(e.key==="Enter"){const id=e.target.value.trim();if(id){setSyncId(id);syncLoad(id);e.target.value="";}}}}
+                    style={{flex:1,background:C.surface,border:"1px solid "+C.border,borderRadius:5,padding:"5px 8px",color:C.text,fontSize:10,outline:"none",fontFamily:"inherit"}}/>
+                  <button onClick={()=>syncLoad(syncId)}
+                    style={{padding:"5px 10px",background:C.accentDim,border:"1px solid "+C.accent+"40",color:C.accent,borderRadius:5,fontSize:10,cursor:"pointer",fontFamily:"inherit",flexShrink:0}}>
+                    ↻ Pull
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
 
         </div>
       )}
